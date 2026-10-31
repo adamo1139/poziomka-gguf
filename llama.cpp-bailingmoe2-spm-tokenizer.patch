@@ -1,0 +1,48 @@
+diff --git a/conversion/bailingmoe.py b/conversion/bailingmoe.py
+index 351be1df1..c09c7b89e 100644
+--- a/conversion/bailingmoe.py
++++ b/conversion/bailingmoe.py
+@@ -1,5 +1,7 @@
+ from __future__ import annotations
+ 
++import json
++
+ from typing import Callable, Iterable, TYPE_CHECKING
+ 
+ import torch
+@@ -120,8 +122,35 @@ class BailingMoeV2Model(TextModel):
+             self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
+ 
+     def set_vocab(self):
++        # some re-trains use a Llama-style byte-fallback BPE tokenizer (U+2581 for spaces)
++        tokenizer_json = self.dir_model / "tokenizer.json"
++        if tokenizer_json.is_file():
++            with open(tokenizer_json, encoding="utf-8") as f:
++                if json.load(f)["model"].get("byte_fallback", False):
++                    self._set_vocab_spm_bpe()
++                    return
+         self._set_vocab_gpt2()
+ 
++    def _set_vocab_spm_bpe(self):
++        # SentencePiece-BPE exported to tokenizer.json: token ids follow merge order, so -id restores the SPM scores
++        vocab = gguf.LlamaHfVocab(self.dir_model)
++        tokens, scores, toktypes = [], [], []
++        for i, (text, _, toktype) in enumerate(vocab.all_tokens()):
++            tokens.append(text)
++            scores.append(-float(i) if toktype == gguf.TokenType.NORMAL else 0.0)
++            toktypes.append(toktype)
++
++        assert len(tokens) == vocab.vocab_size
++
++        self.gguf_writer.add_tokenizer_model("llama")
++        self.gguf_writer.add_tokenizer_pre("default")
++        self.gguf_writer.add_token_list(tokens)
++        self.gguf_writer.add_token_scores(scores)
++        self.gguf_writer.add_token_types(toktypes)
++
++        special_vocab = gguf.SpecialVocab(self.dir_model, n_vocab=len(tokens))
++        special_vocab.add_to_gguf(self.gguf_writer)
++
+     def set_gguf_parameters(self):
+         super().set_gguf_parameters()
+         hparams = self.hparams
